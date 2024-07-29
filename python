@@ -1,0 +1,117 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+from sklearn.preprocessing import MinMaxScaler
+import numpy as np
+from keras.models import Sequential
+from keras.layers import LSTM, Dense
+from keras.callbacks import EarlyStopping
+
+# Load data
+file_path = '/mnt/data/CMO-Historical-Data-Monthly.xlsx'
+data = pd.read_excel(file_path, sheet_name='Monthly Prices', skiprows=3)
+
+# Display data structure and columns
+print(data.head())
+print(data.columns)
+
+# Extract the Gold price column
+gold_data = data[['Date', 'Gold']].dropna()
+gold_data['Date'] = pd.to_datetime(gold_data['Date'])
+gold_data.set_index('Date', inplace=True)
+
+# Plot the gold prices
+gold_data.plot(figsize=(12, 6))
+plt.title('Gold Prices ($/troy oz)')
+plt.ylabel('Price ($/troy oz)')
+plt.xlabel('Date')
+plt.show()
+
+# SARIMA model
+# Split data into train and test sets
+train = gold_data[:'2019']
+test = gold_data['2020':]
+
+# Fit SARIMA model
+sarima_model = SARIMAX(train, order=(1, 1, 1), seasonal_order=(1, 1, 1, 12))
+sarima_result = sarima_model.fit(disp=False)
+print(sarima_result.summary())
+
+# Forecast
+sarima_forecast = sarima_result.get_forecast(steps=len(test))
+sarima_pred = sarima_forecast.predicted_mean
+sarima_conf_int = sarima_forecast.conf_int()
+
+# Plot SARIMA forecast
+plt.figure(figsize=(12, 6))
+plt.plot(train.index, train, label='Train')
+plt.plot(test.index, test, label='Test')
+plt.plot(test.index, sarima_pred, label='SARIMA Forecast')
+plt.fill_between(test.index, sarima_conf_int.iloc[:, 0], sarima_conf_int.iloc[:, 1], color='pink', alpha=0.3)
+plt.title('SARIMA Forecast of Gold Prices')
+plt.xlabel('Date')
+plt.ylabel('Price ($/troy oz)')
+plt.legend()
+plt.show()
+
+
+# Prepare data for LSTM
+scaler = MinMaxScaler(feature_range=(0, 1))
+scaled_gold_data = scaler.fit_transform(gold_data)
+
+# Function to create a dataset for LSTM
+def create_dataset(dataset, time_step=1):
+    X, Y = [], []
+    for i in range(len(dataset) - time_step - 1):
+        a = dataset[i:(i + time_step), 0]
+        X.append(a)
+        Y.append(dataset[i + time_step, 0])
+    return np.array(X), np.array(Y)
+
+# Create dataset with time steps
+time_step = 12
+X, Y = create_dataset(scaled_gold_data, time_step)
+
+# Split data into train and test sets
+train_size = int(len(X) * 0.8)
+test_size = len(X) - train_size
+X_train, X_test = X[:train_size], X[train_size:]
+Y_train, Y_test = Y[:train_size], Y[train_size:]
+
+# Reshape input for LSTM [samples, time steps, features]
+X_train = X_train.reshape((X_train.shape[0], X_train.shape[1], 1))
+X_test = X_test.reshape((X_test.shape[0], X_test.shape[1], 1))
+
+# Define LSTM model
+model = Sequential()
+model.add(LSTM(50, return_sequences=True, input_shape=(time_step, 1)))
+model.add(LSTM(50, return_sequences=False))
+model.add(Dense(1))
+model.compile(optimizer='adam', loss='mean_squared_error')
+
+# Fit the model
+early_stop = EarlyStopping(monitor='val_loss', patience=10, verbose=1)
+history = model.fit(X_train, Y_train, epochs=100, batch_size=64, validation_data=(X_test, Y_test), verbose=1, callbacks=[early_stop])
+
+# Predict
+train_predict = model.predict(X_train)
+test_predict = model.predict(X_test)
+
+# Inverse transform predictions
+train_predict = scaler.inverse_transform(train_predict)
+test_predict = scaler.inverse_transform(test_predict)
+Y_train = scaler.inverse_transform([Y_train])
+Y_test = scaler.inverse_transform([Y_test])
+
+# Plot predictions
+plt.figure(figsize=(12, 6))
+plt.plot(gold_data.index, gold_data, label='Original Data')
+train_range = range(time_step, time_step + len(train_predict))
+test_range = range(time_step + len(train_predict), time_step + len(train_predict) + len(test_predict))
+plt.plot(gold_data.index[train_range], train_predict[:, 0], label='LSTM Train Prediction')
+plt.plot(gold_data.index[test_range], test_predict[:, 0], label='LSTM Test Prediction')
+plt.title('LSTM Forecast of Gold Prices')
+plt.xlabel('Date')
+plt.ylabel('Price ($/troy oz)')
+plt.legend()
+plt.show()
